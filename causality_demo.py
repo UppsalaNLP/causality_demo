@@ -226,7 +226,7 @@ def display_result(state, term, doc_id, filter, seen_documents):
     if doc_id in seen_documents:
         return False
     stats = ['rank', 'count', 'distance', 'nb_matches']
-    doc_title, date = ids_to_date[doc_id][0]
+    doc_title, date = ids2doc[doc_id]
     # publishing date
     # date = datetime.datetime.fromisoformat(date)
     # SOU number-based date
@@ -538,8 +538,8 @@ def order_results_by_documents(distances, neighbours, prompts, text, rank_by):
     return neighbours
 
 
-with open('ids_to_date.pickle', 'rb') as ifile:
-    ids_to_date = pickle.load(ifile)
+with open('ids2doc.pickle', 'rb') as ifile:
+    ids2doc = pickle.load(ifile)
 
 
 def main():
