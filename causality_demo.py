@@ -233,7 +233,6 @@ def display_result(state, term, doc_id, filter, seen_documents):
     year = doc_title.split()[-1].split(':')[0]
     assert year.isnumeric(), f'malformed document title {doc_title} ({year})'
     year = int(year)
-    print(key)
     match = state.ranking[(term, state.scope, state.top_n_ranking,
                            ' '.join(state.rank_by))][key]
 
@@ -455,7 +454,6 @@ def order_results_by_documents(distances, neighbours, prompts, text, rank_by):
     groups matches by document and orders according to avg document rank and
     similarity (still needs to factor in average match count per document)
     """
-    print('DOCUMENT based ORDERING')
     logging.debug('start sorting')
 
     def rank_func(x):
@@ -630,7 +628,7 @@ def read_default_params(state):
     read previous parameters from state
     or return default
     """
-    print('reading parameters')
+    logging.debug('reading parameters')
     default = ''
     cause_default = ''
     effect_default = ''
@@ -745,7 +743,7 @@ def rank(state, prompts, emb_id=None):
     ranking_key = (term, state.scope, state.top_n_ranking,
                    ' '.join(state.rank_by))
     if ranking_key not in state.ranking:
-        print('reranking for', ranking_key)
+        logging.debug('reranking for', ranking_key)
         sorting_func = order_results_by_documents if state.scope == 1\
             else order_results_by_sents
         state.ranking[ranking_key] = run_ranking(
@@ -780,7 +778,6 @@ def rank(state, prompts, emb_id=None):
             state.outpage.append('---')
     logging.debug(f'ranking({prompts}) took {time.time()-start} s ')
     logging.debug('all matches displayed')
-    print('seen documents:', seen_documents)
 
 
 def read_query_params(state=None):
