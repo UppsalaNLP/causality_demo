@@ -550,8 +550,8 @@ def main():
     read_query_params(state)
     if not state.train:
         state.train = load_documents(
-            'training_data/match_embeddings.gzip',
-            'training_data/match_text.csv')
+            'matches/match_embeddings.gzip',
+            'matches/match_text.csv')
 
         # './filtered_vs_unfiltered_nn/full_matches_353599_embeddings.gzip',
         # 'meta.pickle.gz')
@@ -725,8 +725,8 @@ def rank(state, prompts, emb_id=None):
     start = time.time()
     if not hasattr(state, 'train') or not state.train:
         state.train = load_documents(
-            'training_data/match_embeddings.gzip',
-            'training_data/match_text.csv')
+            'matches/match_embeddings.gzip',
+            'matches/match_text.csv')
     if isinstance(prompts, str):
         term = prompts
         prompts = [prompts]
