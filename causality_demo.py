@@ -26,13 +26,14 @@ import math
 import logging
 from urllib import parse
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+logging.basicConfig(format='%(asctime)s %(message)s',
+                    level=logging.DEBUG)
+logging.root.setLevel(logging.NOTSET)
+
 st.set_page_config(page_title='demo app',
                    page_icon=':mag:',
                    layout='centered',
                    initial_sidebar_state='expanded')
-
-logging.basicConfig(format='%(asctime)s %(message)s',
-                    level=logging.DEBUG)
 
 
 def get_table_download_link(table, query):
@@ -442,8 +443,8 @@ def run_ranking(prompts, train, filter, rank_by, n=30,
     else:
         nn = load_binary(outpath)
     distance, neighbours = nn.kneighbors(embeddings, n_neighbors=n)
-    logging.debug(f'run_ranking({prompts}) for {n} neighbors',
-                  f' took {time.time()-start} s ', sorting_func)
+    logging.debug(f'run_ranking({prompts}) for {n} neighbors ' +
+                  f' took {time.time()-start} s ({sorting_func})')
     return sorting_func(distance, neighbours, prompts, train['meta'],
                         rank_by)
 
@@ -744,7 +745,7 @@ def rank(state, prompts, emb_id=None):
     ranking_key = (term, state.scope, state.top_n_ranking,
                    ' '.join(state.rank_by))
     if ranking_key not in state.ranking:
-        logging.debug('reranking for', ranking_key)
+        logging.debug(f'reranking for {ranking_key}')
         sorting_func = order_results_by_documents if state.scope == 1\
             else order_results_by_sents
         state.ranking[ranking_key] = run_ranking(
