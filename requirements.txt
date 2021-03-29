@@ -1,0 +1,7 @@
+torch
+tensorflow
+transformers
+streamlit
+tabulate
+pandas
+scikit-learn==0.23.2
