@@ -32,7 +32,7 @@ st.set_page_config(page_title='demo app',
                    initial_sidebar_state='expanded')
 
 logging.basicConfig(format='%(asctime)s %(message)s',
-                    level=logging.INFO)
+                    level=logging.DEBUG)
 
 
 def get_table_download_link(table, query):
@@ -587,17 +587,24 @@ def setup_settings_bar(state):
     #    state.top_n_ranking = len(state.train['embeddings'])
 
     st.sidebar.markdown('---')
+    st.sidebar.markdown('## Sökfråga')
     select_options = ['ämne', 'mening']
     index = select_options.index(state.search_type) \
         if state.search_type else 0
     state.search_type = st.sidebar.radio('söka efter', select_options, index)
 
     st.sidebar.markdown('---')
+    st.sidebar.markdown('## Resultat')
     select_options = ['count', 'average rank', 'average distance']
     state.rank_by = st.sidebar.multiselect('rangordna efter', select_options,
                                            state.rank_by)
+    select_options = ['enskilda meningar', 'dokument']
+    index = state.scope if state.scope else 0
+    state.scope = select_options.index(st.sidebar.radio('gruppering',
+                                                        select_options, index))
 
     st.sidebar.markdown('---')
+    st.sidebar.markdown('## Filter')
     from_options = [i for i in range(1994, 2020, 1)]
     index = 0
     if state.time_from:
@@ -608,12 +615,6 @@ def setup_settings_bar(state):
     if state.time_to:
         index = to_options.index(state.time_to)
     state.time_to = st.sidebar.selectbox('t.o.m', to_options, index=index)
-
-    st.sidebar.markdown('---')
-    select_options = ['enskilda meningar', 'dokument']
-    index = state.scope if state.scope else 0
-    state.scope = select_options.index(st.sidebar.radio('gruppering',
-                                                        select_options, index))
 
     st.sidebar.markdown('---')
     select_options = ['off', 'on']
@@ -662,7 +663,7 @@ def page_sent_search(state):
         # there is a bug/undesired refreshing of the page that interferes here!
         # sometimes?
         st.title(":mag: Fler resultat som ...")
-        st.markdown(f'## ”_{default}_”')
+        st.markdown(f'##  “_{default}_”')
         start_search = True
     else:
         st.title(":mag: Sökning")
@@ -692,9 +693,9 @@ def page_sent_search(state):
                                        effect=state.query_effect)
             query = ''
             if state.query_cause:
-                query += f'orsak: ”{state.query_cause}”'
+                query += f'orsak:  “{state.query_cause}”'
             if state.query_effect:
-                query += f', verkan: ”{state.query_effect}”'
+                query += f', verkan:  “{state.query_effect}”'
             query = query.lstrip(', ')
             state.outpage.append(f'## _{query}_')
             rank(state, prompts, emb_id=emb_id)
@@ -702,7 +703,7 @@ def page_sent_search(state):
             state.query_cause = state.query_effect = None
             query = default
             if not emb_id:
-                state.outpage.append(f'## ”_{query}_”')
+                state.outpage.append(f'##  “_{query}_”')
             rank(state, [default], emb_id=emb_id)
         if state.result:
             table = pd.DataFrame(state.result)
