@@ -433,7 +433,7 @@ def fit_nn_model(train, n=40):
     return nn
 
 
-@st.cache(allow_output_mutation=True)
+#@st.cache(allow_output_mutation=True)
 def run_ranking(prompts, train, filter, rank_by, n=30,
                 sorting_func=order_results_by_sents, emb_id=None):
     logging.info('start run_ranking')
@@ -466,7 +466,7 @@ def run_ranking(prompts, train, filter, rank_by, n=30,
     return sorting_func(dist, top_k_id, _prompts, train['meta'],
                         rank_by)
 
-@st.cache
+#@st.cache
 def order_results_by_documents(distances, neighbours, prompts, text, rank_by):
     """
     groups matches by document and orders according to avg document rank and
