@@ -18,6 +18,7 @@ import pickle
 # import datetime
 from io import BytesIO
 from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics.pairwise import cosine_distances
 from collections import OrderedDict
 import gzip
 import os
@@ -156,7 +157,6 @@ def init_ct_model():
     tokenizer = AutoTokenizer.from_pretrained(tok_name)
     logging.debug(f'loading BERT model: {model_name}')
     model = AutoModel.from_pretrained(model_name, from_tf=True)
-    model.eval()
     return on_gpu, tokenizer, model
 
 
@@ -168,21 +168,22 @@ def embed_text(samples, prefix='', save_out=True):
     import torch
     from torch.utils.data import DataLoader, SequentialSampler
     on_gpu, tokenizer, model = init_ct_model()
+    model.eval()
     logging.debug(f'embedding {len(samples)} sentences ...')
     embeddings = []
     batch_size = 100
     with torch.no_grad():
         if on_gpu:
             model.to('cuda')
-        dataloader = DataLoader(
-            samples,
-            sampler=SequentialSampler(samples),
-            batch_size=batch_size
-        )
-        logging.debug(f'{math.ceil(len(samples)/batch_size)} batches')
+        dataloader = [samples]
+        if len(samples) > batch_size:
+            dataloader = DataLoader(
+                samples,
+                sampler=SequentialSampler(samples),
+                batch_size=batch_size
+            )
+            logging.debug(f'{math.ceil(len(samples)/batch_size)} batches')
         for i, batch in enumerate(dataloader):
-            if i % 100 == 0:
-                logging.debug(f'at batch {i}')
             inputs = tokenizer(batch, return_tensors="pt", padding=True,
                                truncation=True, max_length=512)
             if on_gpu:
@@ -226,7 +227,7 @@ def display_result(state, term, doc_id, filter, seen_documents):
 
     if doc_id in seen_documents:
         return False
-    stats = ['rank', 'count', 'distance', 'nb_matches']
+    stats = ['rank', 'distance', 'nb_matches']
     doc_title, date = ids2doc[doc_id]
     # publishing date
     # date = datetime.datetime.fromisoformat(date)
@@ -240,21 +241,23 @@ def display_result(state, term, doc_id, filter, seen_documents):
     def rank_func(x):
         filters = []
         for filter in state.rank_by:
-            if filter == 'count':
-                filters.append(match['matched_text'][x]['count'])
             if filter == 'average rank':
                 filters.append(-(sum(match['matched_text'][x]['rank']) /
                                  len(match['matched_text'][x]['rank'])))
             if filter == 'average distance':
-                filters.append(1-(sum(match['matched_text'][x]['distance']) /
-                                  len(match['matched_text'][x]['distance'])))
+                filters.append(1-(match['matched_text'][x]['distance'] /
+                                  len(match['matched_text'][x]['distances'])))
+        if not state.rank_by:
+            filters = -1*match['matched_text'][x]['distance']
+
         return filters
 
     def format_stats(k, match=match):
-        return (": ".join([k, f"{match[k]:>1.3f}"])
+        return (": ".join(
+            [k, f"{match[k]:>1.3f}"])
                 if isinstance(match[k], float)
                 else ": ".join([k,
-                                f"{sum(match[k]) / len(match[k]):>1.3f}"
+                                f"{match[k]}"#sum(match[k]) / len(match[k]):>1.3f}"
                                 if isinstance(match[k], list)
                                 else str(match[k])]))\
                                      if k in match else ''
@@ -322,24 +325,29 @@ def render_sentence(text, match, state, emb_id, doc_title,
             debug_stats = pd.DataFrame({'rank': match["rank"]
                                         + [sum(match['rank']) /
                                            len(match['rank'])],
-                                        'distance': match["distance"]
-                                        + [sum(match['distance']) /
-                                           len(match['distance'])],
+                                        'distance': match["distances"]
+                                        + [match['distance'] /
+                                           len(match['distances'])],
                                         'prompts': match['prompts'] + ['avg']})
         else:
             if state.search_type == 'ämne':
-                debug_stats = pd.DataFrame({'rank': match["rank"],
-                                            'distance': match["distance"],
-                                            'prompt': match['prompts']})
+                #print({'rank': match["rank"],
+                #                            'distance': match["distance"],
+                 #                           'prompt': match['prompts']})
+                debug_stats = pd.DataFrame({
+                    # 'rank': match["rank"],
+                    'distance': match["distances"],
+                    'prompt': match['prompts']})
             else:
-                debug_stats = pd.DataFrame({'rank': match["rank"],
-                                            'distance': match["distance"]})
+                debug_stats = pd.DataFrame({
+                    # 'rank': match["rank"],
+                    'distance': match["distances"]})
 
         state.outpage.append('  \n'
                              + debug_stats.to_markdown().replace('\n',
                                                                  '  \n'))
         state.outpage.append(f'  \nembedding id: {emb_id},' +
-                             f'count {match["count"]}')
+                             f' combined distance: {match["distance"]}')
     res['doc'] = doc_title
     if html_link:
         state.outpage.append(
@@ -362,60 +370,53 @@ def render_sentence(text, match, state, emb_id, doc_title,
 
     state.result.append(res)
 
-
 def order_results_by_sents(distances, neighbours, prompts, text, rank_by):
     logging.debug('start sorting by sents')
     match_dict = {}
     ranked_dict = OrderedDict()
-
+    top_n = len(neighbours)
     def rank_func(x):
         filters = []
         for filter in rank_by:
-            if filter == 'count':
-                filters.append(match_dict[x]['count'])
             if filter == 'average rank':
                 filters.append(-sum(match_dict[x]['rank']) /
                                len(match_dict[x]['rank']))
             if filter == 'average distance':
-                filters.append(1-sum(match_dict[x]['distance']) /
-                               len(match_dict[x]['distance']))
+                filters.append(1 - match_dict[x]['distance'] /
+                               len(match_dict[x]['distances']))
+        if not rank_by:
+            filters = -1*match_dict[x]['distance']
         return filters
 
     # compute context size (ignoring document field)
     available_context = len(text[0]) - 1
     end_left = math.ceil(available_context/2)
-    top_n = len(neighbours[0])
-    for i, prompt in enumerate(prompts):
-        for j, n in enumerate(neighbours[i]):
-            contents = " ".join([' '.join(text[n][1:end_left]),
-                                 '**' + text[n][end_left] + '**',
-                                 ' '.join(text[n][end_left+1:])])
-            doc_id, id = text[n][0].split(':', 1)
-            embedding_id = n
-            key = (contents, doc_id, id, embedding_id)
-            if key not in match_dict:
-                match_dict[key] = {'rank': [],
-                                   'count': 0,
-                                   'nb_matches': 0,
-                                   'distance': [],
-                                   'prompt_ids': [],
-                                   'prompts': []}
-            match_dict[key]['rank'].append(j)
-            match_dict[key]['distance'].append(distances[i][j])
-            match_dict[key]['count'] += 1
+    #top_n = len(neighbours)
+    for j, n in enumerate(neighbours):
+        contents = " ".join([' '.join(text[n][1:end_left]),
+                             '**' + text[n][end_left] + '**',
+                             ' '.join(text[n][end_left+1:])])
+        doc_id, id = text[n][0].split(':', 1)
+        embedding_id = n
+        key = (contents, doc_id, id, embedding_id)
+        if key not in match_dict:
+            match_dict[key] = {'rank': [],
+                               'original rank': [],
+                               'nb_matches': 0,
+                               'distance': 0,
+                               'distances': [],
+                               'prompt_ids': [],
+                               'prompts': []}
+        for i, prompt in enumerate(prompts):
+            match_dict[key]['original rank'].append(j)
+            match_dict[key]['distances'].append(distances[i][j])
             match_dict[key]['prompt_ids'].append(i)
             match_dict[key]['prompts'].append(prompt)
+        match_dict[key]['distance'] = sum(match_dict[key]['distances'])
     # heuristics to get complete average:
     # we assume each neighbor missing in a prompt's
     # top n ranking is at best at rank n+1 at a similar
     # distance to the nth nearest neighbor
-    for key in match_dict:
-        if match_dict[key]['count'] < len(prompts):
-            for i, prompt in enumerate(prompts):
-                if i not in match_dict[key]['prompt_ids']:
-                    match_dict[key]['rank'].append(top_n)
-                    match_dict[key]['distance'].append(distances[i][-1])
-                    match_dict[key]['prompts'].append(prompt)
 
     for key in sorted(match_dict, key=rank_func, reverse=True):
         ranked_dict[key] = match_dict[key]
@@ -423,31 +424,47 @@ def order_results_by_sents(distances, neighbours, prompts, text, rank_by):
     return ranked_dict
 
 
+# @st.cache()
+def fit_nn_model(train, n=40):
+    start = time.time()
+    nn = NearestNeighbors(n_neighbors=n, metric='cosine', p=1)
+    nn.fit(train['embeddings'])
+    logging.debug(f'fit_nn_model took {time.time()-start} s')
+    return nn
+
+
 @st.cache(allow_output_mutation=True)
 def run_ranking(prompts, train, filter, rank_by, n=30,
-                sorting_func=order_results_by_sents,
-                emb_id=None):
+                sorting_func=order_results_by_sents, emb_id=None):
+    logging.info('start run_ranking')
     start = time.time()
     if emb_id is None:
         embeddings = embed_text(prompts, save_out=False)
-        if len(prompts) > 1:
-            n *= 3
     else:
         embeddings = torch.unsqueeze(train['embeddings'][emb_id], dim=0)
-    outpath = f'{len(train["embeddings"])}_nn.gzip'
-    if not os.path.exists(outpath):
-        nn = NearestNeighbors(n_neighbors=40, metric='cosine', p=1)
-        nn.fit(train['embeddings'])
-        with gzip.GzipFile(outpath, 'wb') as data_out:
-            data_out.write(pickle.dumps(nn))
-    else:
-        nn = load_binary(outpath)
-    distance, neighbours = nn.kneighbors(embeddings, n_neighbors=n)
+    logging.info('hello')
+    nn = fit_nn_model(train)
+    i = 5
+    prompt = prompts[i]
+    reranking_prompts = prompts[:i] + prompts[i+1:]
+    _prompts = [prompt] + reranking_prompts
+    logging.info('call kneighbors')
+    top_k_dist, top_k_id = nn.kneighbors(torch.unsqueeze(embeddings[i], axis=0), n_neighbors=n)
+    logging.info('finished')
+    top_k_id = top_k_id[0]
+    top_k_emb = torch.squeeze(torch.stack([train['embeddings'][i] for i in top_k_id]))
+    # rerank based on remaining prompts
+    reranked_dist = torch.tensor(
+        cosine_distances(torch.cat([embeddings[:i],
+                                    embeddings[i+1:]]),
+                         top_k_emb))
+    dist = torch.cat([torch.tensor(top_k_dist), reranked_dist])
+    logging.info('end run_ranking')
     logging.debug(f'run_ranking({prompts}) for {n} neighbors ' +
-                  f' took {time.time()-start} s ({sorting_func})')
-    return sorting_func(distance, neighbours, prompts, train['meta'],
+                  f' took {time.time()-start} s ({sorting_func})' +
+                  f'{len(top_k_id)} neighbours and {dist.shape}')
+    return sorting_func(dist, top_k_id, _prompts, train['meta'],
                         rank_by)
-
 
 @st.cache
 def order_results_by_documents(distances, neighbours, prompts, text, rank_by):
@@ -469,67 +486,62 @@ def order_results_by_documents(distances, neighbours, prompts, text, rank_by):
         return filters
 
     match_dict = {}
-    top_n = len(neighbours[0])
+    top_n = len(neighbours)
     # compute context size (ignoring document field)
     available_context = len(text[0]) - 1
     end_left = math.ceil(available_context/2)
-    top_n = len(neighbours[0])
-    for i, prompt in enumerate(prompts):
-        for j, n in enumerate(neighbours[i]):
-            match = {}
-            contents = " ".join([' '.join(text[n][1:end_left]),
-                                 '**' + text[n][end_left] + '**',
-                                 ' '.join(text[n][end_left+1:])])
+    for j, n in enumerate(neighbours):
+        match = {}
+        contents = " ".join([' '.join(text[n][1:end_left]),
+                             '**' + text[n][end_left] + '**',
+                             ' '.join(text[n][end_left+1:])])
 
-            match['content'] = contents
-            match['doc_id'], id = text[n][0].split(':', 1)
-            match['emb_id'] = n
-            if match['doc_id'] not in match_dict:
-                match_dict[match['doc_id']] = {'rank': 0,
-                                               'count': 0,
-                                               'nb_matches': 0,
-                                               'distance': 0,
-                                               'matched_text': {}}
+        match['content'] = contents
+        match['doc_id'], id = text[n][0].split(':', 1)
+        match['emb_id'] = n
+        if match['doc_id'] not in match_dict:
+            match_dict[match['doc_id']] = {'rank': 0,
+                                           # 'count': 0,
+                                           'nb_matches': 0,
+                                           'distance': 0,
+                                           'distances': [],
+                                           'matched_text': {}}
+        key = match['doc_id']
+        if id not in match_dict[key]['matched_text']:
+            match_dict[key]['matched_text'][id] = {
+                'rank': [],
+                # 'count': 0,
+                'distance': 0,
+                'distances': [],
+                'prompt_ids': [],
+                'prompts': [],
+                'text': match}
+        for i, prompt in enumerate(prompts):
             distance = distances[i][j]
-            key = match['doc_id']
-            if id not in match_dict[key]['matched_text']:
-                match_dict[key]['matched_text'][id] = {
-                    'rank': [],
-                    'count': 0,
-                    'distance': [],
-                    'prompt_ids': [],
-                    'prompts': [],
-                    'text': match}
             match_dict[key]['matched_text'][id]['rank'].append(j)
-            match_dict[key]['matched_text'][id]['distance'].append(distance)
-            match_dict[key]['matched_text'][id]['count'] += 1
+            match_dict[key]['matched_text'][id]['distances'].append(distance)
+            # match_dict[key]['matched_text'][id]['count'] += 1
             match_dict[key]['matched_text'][id]['prompt_ids'].append(i)
             match_dict[key]['matched_text'][id]['prompts'].append(prompt)
 
     for doc_id, neighbor in match_dict.items():
         count = 0
         for text in neighbor['matched_text']:
-            if neighbor['matched_text'][text]['count'] < len(prompts):
-                for i, prompt in enumerate(prompts):
-                    if i not in neighbor['matched_text'][text]['prompt_ids']:
-                        neighbor['matched_text'][text]['rank'].append(top_n)
-                        neighbor['matched_text'][text]['distance'].append(
-                            distances[i][-1])
-                        neighbor['matched_text'][text]['prompts'].append(
-                            prompt)
+            neighbor['matched_text'][text]['distance'] = sum(
+                neighbor['matched_text'][text]['distances'])
             stats = neighbor['matched_text'][text]
             avg_rank = sum([int(el) + 1 for el in stats['rank']]) / len(
                 stats['rank'])
-            avg_distance = sum([float(el) for el in stats['distance']])\
-                / len(stats['distance'])
-            match_dict[doc_id]['count'] += stats['count']
+            avg_distance = stats['distance'] / len(stats['distances'])
+            # match_dict[doc_id]['count'] += stats['count']
             match_dict[doc_id]['rank'] += avg_rank
             match_dict[doc_id]['distance'] += avg_distance
             match_dict[doc_id]['nb_matches'] += 1
             count += 1
-        match_dict[doc_id]['count'] /= count
+        # match_dict[doc_id]['count'] /= count
         match_dict[doc_id]['rank'] /= count
         match_dict[doc_id]['distance'] /= count
+        match_dict[doc_id]['distance'] = match_dict[doc_id]['distance'].item()
     neighbours = OrderedDict()
     for doc in sorted(match_dict,
                       key=rank_func,
@@ -596,7 +608,7 @@ def setup_settings_bar(state):
 
     st.sidebar.markdown('---')
     st.sidebar.markdown('## Resultat')
-    select_options = ['count', 'average rank', 'average distance']
+    select_options = ['average rank', 'average distance']
     state.rank_by = st.sidebar.multiselect('rangordna efter', select_options,
                                            state.rank_by)
     select_options = ['enskilda meningar', 'dokument']
