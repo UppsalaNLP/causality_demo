@@ -29,7 +29,7 @@ from urllib import parse
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 logging.basicConfig(format='%(asctime)s %(message)s',
                     level=logging.DEBUG)
-logging.root.setLevel(logging.NOTSET)
+logging.root.setLevel(logging.DEBUG)
 
 st.set_page_config(page_title='demo app',
                    page_icon=':mag:',
@@ -70,14 +70,16 @@ def generate_prompts(cause=None, effect=None):
         '"leda till"': ['[MASK] leder till X'],
         'medföra': ['[MASK] medför X'],
         'orsaka': ['[MASK] orsakar X'],
-        '"på grund av"': ['X på grund av [MASK]'],
+        '"på grund av"': ['X på grund av [MASK]',
+                          'X händer på grund av [MASK]'],
         'påverka': ['[MASK] påverkar X'],
         'resultera': ['[MASK] resulterar i X'],
-        '"till följd av"': ['X till följd av [MASK]'],
+        '"till följd av"': ['X till följd av [MASK]',
+                            'X händer till följd av [MASK]'],
         '"vara ett resultat av"': ['X är ett resultat av [MASK]'],
         'vålla': ['[MASK] vållar X']}
 
-    templates = [template.lstrip('(alternativ: ').rstrip(')')
+    templates = [template
                  for keyword_templates in prompt_dict.values()
                  for template in keyword_templates]
 
@@ -145,7 +147,7 @@ def load_documents(input_emb, input_meta):
 
 
 @st.cache(allow_output_mutation=True)
-def init_ct_model():
+def init_ct_model(selected_model):
     from transformers import AutoModel, AutoTokenizer
     import torch
 
@@ -153,6 +155,8 @@ def init_ct_model():
     on_gpu = torch.cuda.is_available()
     logging.debug(f'GPU available: {on_gpu}')
     model_name = tok_name = "Contrastive-Tension/BERT-Base-Swe-CT-STSb"
+    if selected_model == 1:
+        pass # use new model
     logging.debug(f'loading tokeniser: {tok_name}')
     tokenizer = AutoTokenizer.from_pretrained(tok_name)
     logging.debug(f'loading BERT model: {model_name}')
@@ -161,13 +165,13 @@ def init_ct_model():
 
 
 @st.cache
-def embed_text(samples, prefix='', save_out=True):
+def embed_text(samples, prefix='', save_out=True, selected_model=0):
     """
     embed samples using the swedish STS model
     """
     import torch
     from torch.utils.data import DataLoader, SequentialSampler
-    on_gpu, tokenizer, model = init_ct_model()
+    on_gpu, tokenizer, model = init_ct_model(selected_model)
     model.eval()
     logging.debug(f'embedding {len(samples)} sentences ...')
     embeddings = []
@@ -362,7 +366,8 @@ def render_sentence(text, match, state, emb_id, doc_title,
                                      'scope': state.scope,
                                      'debug': state.debug,
                                      'top_n_ranking': state.top_n_ranking,
-                                     'rank_by': state.rank_by},
+                                     'rank_by': state.rank_by,
+                                     'selected_model': state.selected_model},
                                     doseq=True)
     state.outpage.append(
         '[visa fler resultat som liknar avsnittet!]' +
@@ -391,7 +396,6 @@ def order_results_by_sents(distances, neighbours, prompts, text, rank_by):
     # compute context size (ignoring document field)
     available_context = len(text[0]) - 1
     end_left = math.ceil(available_context/2)
-    #top_n = len(neighbours)
     for j, n in enumerate(neighbours):
         contents = " ".join([' '.join(text[n][1:end_left]),
                              '**' + text[n][end_left] + '**',
@@ -435,35 +439,40 @@ def fit_nn_model(train, n=40):
 
 #@st.cache(allow_output_mutation=True)
 def run_ranking(prompts, train, filter, rank_by, n=30,
-                sorting_func=order_results_by_sents, emb_id=None):
+                sorting_func=order_results_by_sents, emb_id=None,
+                selected_model=0):
     logging.info('start run_ranking')
     start = time.time()
     if emb_id is None:
-        embeddings = embed_text(prompts, save_out=False)
+        embeddings = embed_text(prompts, save_out=False, selected_model=selected_model)
     else:
         embeddings = torch.unsqueeze(train['embeddings'][emb_id], dim=0)
-    logging.info('hello')
     nn = fit_nn_model(train)
-    i = 5
-    prompt = prompts[i]
-    reranking_prompts = prompts[:i] + prompts[i+1:]
-    _prompts = [prompt] + reranking_prompts
-    logging.info('call kneighbors')
-    top_k_dist, top_k_id = nn.kneighbors(torch.unsqueeze(embeddings[i], axis=0), n_neighbors=n)
-    logging.info('finished')
-    top_k_id = top_k_id[0]
-    top_k_emb = torch.squeeze(torch.stack([train['embeddings'][i] for i in top_k_id]))
-    # rerank based on remaining prompts
-    reranked_dist = torch.tensor(
-        cosine_distances(torch.cat([embeddings[:i],
-                                    embeddings[i+1:]]),
-                         top_k_emb))
-    dist = torch.cat([torch.tensor(top_k_dist), reranked_dist])
+    if len(prompts) > 1:
+        i = 5
+        prompt = prompts[i]
+        reranking_prompts = prompts[:i] + prompts[i+1:]
+        prompts = [prompt] + reranking_prompts
+        logging.info('call kneighbors')
+        top_k_dist, top_k_id = nn.kneighbors(torch.unsqueeze(embeddings[i], axis=0), n_neighbors=n)
+        logging.info('finished')
+        top_k_id = top_k_id[0]
+        top_k_emb = torch.squeeze(torch.stack([train['embeddings'][i] for i in top_k_id]))
+        # rerank based on remaining prompts
+        reranked_dist = torch.tensor(
+            cosine_distances(torch.cat([embeddings[:i],
+                                        embeddings[i+1:]]),
+                             top_k_emb))
+        dist = torch.cat([torch.tensor(top_k_dist), reranked_dist])
+    else:
+        dist, top_k_id = nn.kneighbors(embeddings, n_neighbors=n)
+        dist = torch.tensor(dist)
+        top_k_id = top_k_id[0]
     logging.info('end run_ranking')
     logging.debug(f'run_ranking({prompts}) for {n} neighbors ' +
                   f' took {time.time()-start} s ({sorting_func})' +
                   f'{len(top_k_id)} neighbours and {dist.shape}')
-    return sorting_func(dist, top_k_id, _prompts, train['meta'],
+    return sorting_func(dist, top_k_id, prompts, train['meta'],
                         rank_by)
 
 #@st.cache
@@ -580,7 +589,7 @@ def main():
 
 def setup_settings_bar(state):
     st.sidebar.title(":wrench: Inställningar")
-    # this is buggy
+    # this is buggy use button instead?
     # if st.sidebar.checkbox('begränsa träffmängden'):
     #     if not state.n_results:
     #         state.n_results = 10
@@ -590,7 +599,19 @@ def setup_settings_bar(state):
     # else:
     state.n_results = 0
 
-    st.sidebar.markdown('---')
+    # st.sidebar.markdown('---')
+    # st.sidebar.markdown('## Model')
+    state.model_options = {'simple ct': "Contrastive-Tension/BERT-Base-Swe-CT-STSb",
+                           'custom ct': "Uppsala-Relations-Model-HumanStop.weights"}
+    select_options = sorted(state.model_options, reverse=True)
+    if state.selected_model is None:
+        state.selected_model = 0
+    # state.selected_model = st.sidebar.radio('specify model for nn ranking',
+    #                                         select_options,
+    #                                         state.selected_model)
+    # state.selected_model = select_options.index(state.selected_model)
+    state.rerank_by = None  # add new model as filter
+    # st.sidebar.markdown('---')
     if not state.top_n_ranking:
         state.top_n_ranking = 10
     state.top_n_ranking = st.sidebar.number_input('Top n ranking:',
@@ -650,6 +671,7 @@ def read_default_params(state):
     query_params = get_query_params(state)
     if state.debug:
         st.write(f'QUERY params: {query_params}')
+        st.write(f'using model: {state.selected_model}')
     if 'emb_id' in query_params:
         emb_id = query_params['emb_id']
         if isinstance(emb_id, list):
@@ -767,7 +789,8 @@ def rank(state, prompts, emb_id=None):
                     'emb_id': emb_id},
             rank_by=state.rank_by,
             n=state.top_n_ranking, emb_id=emb_id,
-            sorting_func=sorting_func)
+            sorting_func=sorting_func,
+            selected_model=state.selected_model)
     n_matches = 0
     ranking_unit = 'document' if state.scope == 1 else 'sentence'
     logging.info(
@@ -817,7 +840,7 @@ def update_query_params(state):
     params = ['emb_id', 'time_from', 'time_to', 'debug',
               'n_results', 'search_type', 'scope', 'query',
               'query_cause', 'query_effect', 'top_n_ranking',
-              'rank_by']
+              'rank_by', 'selected_model']
     updated_states = {}
 
     for param in params:
