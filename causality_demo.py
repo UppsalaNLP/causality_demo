@@ -5,6 +5,8 @@ from streamlit.hashing import _CodeHasher
 import pandas as pd
 import torch
 import time
+from tqdm import tqdm
+import sys
 try:
     # Before Streamlit 0.65
     from streamlit.ReportThread import get_report_ctx
@@ -26,6 +28,7 @@ import re
 import math
 import logging
 from urllib import parse
+from memory_profiler import profile
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 logging.basicConfig(format='%(asctime)s %(message)s',
                     level=logging.DEBUG)
@@ -165,6 +168,7 @@ def init_ct_model(selected_model):
 
 
 @st.cache
+@profile
 def embed_text(samples, prefix='', save_out=True, selected_model=0):
     """
     embed samples using the swedish STS model
@@ -218,7 +222,7 @@ def mean_pool(model_out, input_mask):
 
 
 # @st.cache
-def display_result(state, term, doc_id, filter, seen_documents):
+def display_result(state, term, doc_id, filter, seen_documents, match):
     """
     display a single match if it matches the filter
     """
@@ -239,8 +243,8 @@ def display_result(state, term, doc_id, filter, seen_documents):
     year = doc_title.split()[-1].split(':')[0]
     assert year.isnumeric(), f'malformed document title {doc_title} ({year})'
     year = int(year)
-    match = state.ranking[(term, state.scope, state.top_n_ranking,
-                           ' '.join(state.rank_by))][key]
+    # match = state.ranking[(term, state.scope, state.top_n_ranking,
+    #                       ' '.join(state.rank_by))][key]
 
     def rank_func(x):
         filters = []
@@ -376,10 +380,11 @@ def render_sentence(text, match, state, emb_id, doc_title,
     state.result.append(res)
 
 def order_results_by_sents(distances, neighbours, prompts, text, rank_by):
+    start_t = time.time()
     logging.debug('start sorting by sents')
     match_dict = {}
     ranked_dict = OrderedDict()
-    top_n = len(neighbours)
+
     def rank_func(x):
         filters = []
         for filter in rank_by:
@@ -425,10 +430,11 @@ def order_results_by_sents(distances, neighbours, prompts, text, rank_by):
     for key in sorted(match_dict, key=rank_func, reverse=True):
         ranked_dict[key] = match_dict[key]
     logging.debug('stop sorting')
-    return ranked_dict
+    return ranked_dict, time.time() - start_t
 
 
 # @st.cache()
+@profile
 def fit_nn_model(train, n=40):
     start = time.time()
     nn = NearestNeighbors(n_neighbors=n, metric='cosine', p=1)
@@ -438,6 +444,7 @@ def fit_nn_model(train, n=40):
 
 
 #@st.cache(allow_output_mutation=True)
+@profile
 def run_ranking(prompts, train, filter, rank_by, n=30,
                 sorting_func=order_results_by_sents, emb_id=None,
                 selected_model=0):
@@ -472,15 +479,19 @@ def run_ranking(prompts, train, filter, rank_by, n=30,
     logging.debug(f'run_ranking({prompts}) for {n} neighbors ' +
                   f' took {time.time()-start} s ({sorting_func})' +
                   f'{len(top_k_id)} neighbours and {dist.shape}')
+    ranking_time = time.time() - start
     return sorting_func(dist, top_k_id, prompts, train['meta'],
-                        rank_by)
+                        rank_by), ranking_time
 
 #@st.cache
+@profile
 def order_results_by_documents(distances, neighbours, prompts, text, rank_by):
     """
     groups matches by document and orders according to avg document rank and
     similarity (still needs to factor in average match count per document)
     """
+
+    start_t = time.time()
     logging.debug('start sorting')
 
     def rank_func(x):
@@ -492,10 +503,13 @@ def order_results_by_documents(distances, neighbours, prompts, text, rank_by):
                 filters.append(-match_dict[x]['rank'])
             if filter == 'average distance':
                 filters.append(1-match_dict[x]['distance'])
+        if not rank_by:
+            filters = -1*match_dict[x]['distance']
+
         return filters
 
     match_dict = {}
-    top_n = len(neighbours)
+
     # compute context size (ignoring document field)
     available_context = len(text[0]) - 1
     end_left = math.ceil(available_context/2)
@@ -557,13 +571,14 @@ def order_results_by_documents(distances, neighbours, prompts, text, rank_by):
                       reverse=True):
         neighbours[doc] = match_dict[doc]
     logging.debug('stop sorting')
-    return neighbours
+    return neighbours, time.time() - start_t
 
 
 with open('ids2doc.pickle', 'rb') as ifile:
     ids2doc = pickle.load(ifile)
 
 
+@profile
 def main():
     logging.debug('start main')
     state = _get_state()
@@ -585,6 +600,133 @@ def main():
     state.sync()
     logging.debug('end sync')
     logging.debug('end main')
+
+
+def automate_tests():
+    print('start tests')
+    from itertools import product
+    logging.root.setLevel(logging.CRITICAL)
+    state = _get_state()
+    run_stats = {'sorting time':[], 'ranking time': [], 'n_results': [],
+                 'term': [], 'n_rank': [], 'rank setting': [], 'grouping': []}
+    on_gpu, tokenizer, model = init_ct_model(0)
+    # terms = ['klimat', 'hälsa', 'missbruk', 'arbetslöshet', 'tillväxt']
+    terms = ['Koldioxidutsläppen leder till klimatförändringar.',
+             'Åtskilliga studier visar att pensionering leder till bättre hälsa',
+             'All tidigare vård har lett till återfall i missbruk. ”',
+             'Det har lett till en överetablering och en permanent arbetslöshet bland konstnärerna.',
+             'Framgången i dessa strävanden påverkar både sysselsättning och ekonomisk tillväxt i Sverige.']
+    n_ranks = [1000, 10000, 100000]
+    groupings = [0, 1]
+    rank_settings = [[], ['average distance']]
+    settings = list(product(terms, n_ranks, groupings, rank_settings))
+    if state.seen is None:
+        state.seen = []
+    print(len(settings))
+    n_runs=10
+    for i, setting in enumerate(settings):
+        print(f'setting {i + 1} of {len(settings)}: {setting}, already seen: {state.seen}')
+        if setting in state.seen:
+            print('skipping', setting)
+            continue
+        else:
+            state.seen.append(setting)
+        query, n_rank, search_grouping, rank_setting = setting
+        print()
+        print(query, n_rank, search_grouping, rank_setting)
+        run_stats['term'].append(query)
+        run_stats['n_rank'].append(n_rank)
+        run_stats['grouping'].append(search_grouping)
+        
+        state, new_stats = automate_test_run(state, query, n_rank,
+                                             search_grouping, rank_setting,
+                                             n_runs=n_runs)
+        if rank_setting :
+            run_stats['rank setting'].append(rank_setting[0])
+        else:
+            run_stats['rank setting'].append('default')
+        run_stats['sorting time'].append(new_stats['sorting time'])
+        run_stats['ranking time'].append(new_stats['ranking time'])
+        run_stats['n_results'].append(new_stats['n_results'])
+        print(run_stats)
+
+    print('done?')
+    run_stats = pd.DataFrame(run_stats)
+    if state.run_stats is None:
+        state.run_stats = run_stats
+    else:
+        state.run_stats = pd.concat([pd.DataFrame(state.run_stats), run_stats])
+    state.run_stats.to_excel(f'sents_test_{n_runs}_runs_statistics.xlsx', engine='xlsxwriter')
+    print(state.run_stats)
+    print('end tests')
+    print('start sync')
+    state.sync()
+    print('end sync')
+
+    sys.exit()
+
+
+def automate_test_run(state, query, n_rank, search_grouping, rank_setting, n_runs=2):
+    logging.debug('start test run')
+    read_query_params(state)
+    emb_id = None
+    state.time_from = 1994
+    state.time_to = 2020
+    if ' ' in query:
+        state.query = query
+        state.search_type = 'mening'
+    else:
+        state.query_effect = query
+        state.search_type = 'ämne'
+    state.top_n_ranking = n_rank
+    state.scope = search_grouping
+    state.rank_by = rank_setting
+    state.run_stats = {'sorting time':[], 'ranking time': [], 'n_results': []}
+    if not state.train:
+        state.train = load_documents(
+            'matches/match_embeddings.gzip',
+            'matches/match_text.csv')
+    for _ in tqdm(range(n_runs)):
+        state.start_search = True
+        #page_sent_search(state)
+        state.outpage = []
+        state.outpage.append(
+            f'# Resultat för {state.search_type}sbaserat sökning')
+        if (state.query_cause or state.query_effect)\
+           and state.search_type == 'ämne':
+            state.query = None
+            prompts = generate_prompts(cause=state.query_cause,
+                                       effect=state.query_effect)
+            query = ''
+            if state.query_cause:
+                query += f'orsak:  “{state.query_cause}”'
+            if state.query_effect:
+                query += f', verkan:  “{state.query_effect}”'
+            query = query.lstrip(', ')
+            state.outpage.append(f'## _{query}_')
+            rank(state, prompts, emb_id=emb_id)
+        elif state.query:
+            state.query_cause = state.query_effect = None
+            query = state.query
+            if not emb_id:
+                state.outpage.append(f'##  “_{query}_”')
+            rank(state, [state.query], emb_id=emb_id)
+        #st.write(state.result)
+        if state.result:
+            table = pd.DataFrame(state.result)
+            if state.run_stats is not None:
+                state.run_stats['n_results'].append(len(table))
+            state.outpage = state.outpage[:state.insert_link]\
+                + [get_table_download_link(table, query)]\
+                + state.outpage[state.insert_link:]
+        #st.markdown('  \n'.join(state.outpage[:-1]), unsafe_allow_html=True)
+
+    # Mandatory to avoid rollbacks with widgets,
+    # must be called at the end of your app
+    run_stats = {k:sum(v)/len(v) for k,v in state.run_stats.items()}
+    print(run_stats)
+    logging.debug('end test run')
+    return state, run_stats
 
 
 def setup_settings_bar(state):
@@ -692,6 +834,7 @@ def read_default_params(state):
 
 
 def page_sent_search(state):
+    print('in page sent search')
     setup_settings_bar(state)
     default, cause_default, effect_default, emb_id = read_default_params(state)
     if emb_id is not None:
@@ -742,6 +885,8 @@ def page_sent_search(state):
             rank(state, [default], emb_id=emb_id)
         if state.result:
             table = pd.DataFrame(state.result)
+            if state.run_stats is not None:
+                state.run_stats['n_results'].append(len(table))
             state.outpage = state.outpage[:state.insert_link]\
                 + [get_table_download_link(table, query)]\
                 + state.outpage[state.insert_link:]
@@ -749,7 +894,7 @@ def page_sent_search(state):
     elif state.outpage:
         st.markdown('  \n'.join(state.outpage[:-1]), unsafe_allow_html=True)
 
-
+@profile
 def rank(state, prompts, emb_id=None):
     state.outpage.append('---')
     state.insert_link = len(state.outpage) - 1
@@ -774,15 +919,19 @@ def rank(state, prompts, emb_id=None):
             term += f'; Verkan: {state.query_effect}'
         term = term.strip('; ')
         state.term = term
-    if not state.ranking:
-        state.ranking = {}
     ranking_key = (term, state.scope, state.top_n_ranking,
                    ' '.join(state.rank_by))
-    if ranking_key not in state.ranking:
-        logging.debug(f'reranking for {ranking_key}')
+
+    # if not state.ranking:
+    #     state.ranking = {}
+    # ranking_key = (term, state.scope, state.top_n_ranking,
+    #                ' '.join(state.rank_by))
+    # if ranking_key not in state.ranking:
+    if True:
+        logging.debug(f'ranking {ranking_key}')
         sorting_func = order_results_by_documents if state.scope == 1\
             else order_results_by_sents
-        state.ranking[ranking_key] = run_ranking(
+        (ranking, sorting_time), ranking_time = run_ranking(
             prompts, state.train,
             filter={'time_from': state.time_from,
                     'time_to': state.time_to,
@@ -791,17 +940,24 @@ def rank(state, prompts, emb_id=None):
             n=state.top_n_ranking, emb_id=emb_id,
             sorting_func=sorting_func,
             selected_model=state.selected_model)
+        # keep track of last ranking
+        state.ranking_key = ranking_key
+        if state.run_stats is not None:
+            state.run_stats['sorting time'].append(sorting_time)
+            state.run_stats['ranking time'].append(ranking_time)
     n_matches = 0
     ranking_unit = 'document' if state.scope == 1 else 'sentence'
     logging.info(
-        f'ranking {len(state.ranking[ranking_key])}' +
+        f'ranking {len(ranking)}' +
         f' {ranking_unit}s for "{ranking_key}"')
     seen_documents = []
-    for el in state.ranking[ranking_key]:
+    for el in ranking:
         hit = display_result(state, term, el, {'time_from': state.time_from,
                                                'time_to': state.time_to,
                                                'emb_id': emb_id},
-                             seen_documents)
+                             seen_documents,
+                             match=ranking[el]
+)
         if hit:
             if isinstance(el, tuple):
                 text, doc_id, sent_nb, match_emb_id = el
@@ -945,3 +1101,5 @@ def _get_state(hash_funcs=None):
 
 if __name__ == "__main__":
     main()
+    #st.stop()
+    # automate_tests()
