@@ -1,12 +1,23 @@
 import csv
 import base64
+import time
+from tqdm import tqdm
+import sys
+from io import BytesIO
+import pickle
+from collections import OrderedDict
+import gzip
+import os
+import re
+import math
+import logging
+from urllib import parse
+
 import streamlit as st
 from streamlit.hashing import _CodeHasher
 import pandas as pd
 import torch
-import time
-from tqdm import tqdm
-import sys
+
 try:
     # Before Streamlit 0.65
     from streamlit.ReportThread import get_report_ctx
@@ -15,24 +26,15 @@ except ModuleNotFoundError:
     # After Streamlit 0.65
     from streamlit.report_thread import get_report_ctx
     from streamlit.server.server import Server
-
-import pickle
 # import datetime
-from io import BytesIO
 from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics.pairwise import cosine_distances
-from collections import OrderedDict
-import gzip
-import os
-import re
-import math
-import logging
-from urllib import parse
-from memory_profiler import profile
+# from memory_profiler import profile
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 logging.basicConfig(format='%(asctime)s %(message)s',
                     level=logging.DEBUG)
-logging.root.setLevel(logging.DEBUG)
+# logging.root.setLevel(logging.DEBUG)
+logging.root.setLevel(logging.NOTSET)
 
 st.set_page_config(page_title='demo app',
                    page_icon=':mag:',
@@ -131,6 +133,7 @@ def load_binary(emb_file):
 
 
 @st.cache(allow_output_mutation=True)
+# @profile
 def load_documents(input_emb, input_meta):
     """
     load prefiltered text and embeddings.
@@ -146,7 +149,8 @@ def load_documents(input_emb, input_meta):
             reader = csv.reader(ifile, delimiter=';')
             docs['meta'] = [line for line in reader]
     logging.debug(f'load_documents() took {time.time()-start} s ')
-    return docs
+    nn = fit_nn_model(docs)
+    return docs, nn
 
 
 @st.cache(allow_output_mutation=True)
@@ -168,7 +172,7 @@ def init_ct_model(selected_model):
 
 
 @st.cache
-@profile
+# @profile
 def embed_text(samples, prefix='', save_out=True, selected_model=0):
     """
     embed samples using the swedish STS model
@@ -275,7 +279,7 @@ def display_result(state, term, doc_id, filter, seen_documents, match):
         # if we extract page ids from the html we might even be able to
         # link the approximate location of the match
         # (ids seem to be a little off)
-        # todo add newline for lists (or remove them from matches)
+
         displayed_sents = 0
         doc_title_text = doc_title
         continuation = re.findall(r'd(\d+)$', doc_id)
@@ -299,7 +303,7 @@ def display_result(state, term, doc_id, filter, seen_documents, match):
                                 state,
                                 sentence_match['text']['emb_id'],
                                 sent_stats, doc_id,
-                                doc_title_text,
+                                doc_id,  # title_text,
                                 section=sent.split(':')[-1].strip("'"))
 
                 displayed_sents += 1
@@ -388,9 +392,9 @@ def order_results_by_sents(distances, neighbours, prompts, text, rank_by):
     def rank_func(x):
         filters = []
         for filter in rank_by:
-            if filter == 'average rank':
-                filters.append(-sum(match_dict[x]['rank']) /
-                               len(match_dict[x]['rank']))
+            # if filter == 'average rank':
+            #     filters.append(-sum(match_dict[x]['rank']) /
+            #                    len(match_dict[x]['rank']))
             if filter == 'average distance':
                 filters.append(1 - match_dict[x]['distance'] /
                                len(match_dict[x]['distances']))
@@ -434,7 +438,7 @@ def order_results_by_sents(distances, neighbours, prompts, text, rank_by):
 
 
 # @st.cache()
-@profile
+# @profile
 def fit_nn_model(train, n=40):
     start = time.time()
     nn = NearestNeighbors(n_neighbors=n, metric='cosine', p=1)
@@ -444,17 +448,17 @@ def fit_nn_model(train, n=40):
 
 
 #@st.cache(allow_output_mutation=True)
-@profile
+# @profile
 def run_ranking(prompts, train, filter, rank_by, n=30,
                 sorting_func=order_results_by_sents, emb_id=None,
-                selected_model=0):
+                selected_model=0, nn=None):
     logging.info('start run_ranking')
     start = time.time()
     if emb_id is None:
         embeddings = embed_text(prompts, save_out=False, selected_model=selected_model)
     else:
         embeddings = torch.unsqueeze(train['embeddings'][emb_id], dim=0)
-    nn = fit_nn_model(train)
+    #nn = fit_nn_model(train)
     if len(prompts) > 1:
         i = 5
         prompt = prompts[i]
@@ -484,7 +488,7 @@ def run_ranking(prompts, train, filter, rank_by, n=30,
                         rank_by), ranking_time
 
 #@st.cache
-@profile
+# @profile
 def order_results_by_documents(distances, neighbours, prompts, text, rank_by):
     """
     groups matches by document and orders according to avg document rank and
@@ -578,27 +582,24 @@ with open('ids2doc.pickle', 'rb') as ifile:
     ids2doc = pickle.load(ifile)
 
 
-@profile
+# @profile
 def main():
     logging.debug('start main')
     state = _get_state()
     read_query_params(state)
     if not state.train:
-        state.train = load_documents(
+        state.train, state.nn = load_documents(
             'matches/match_embeddings.gzip',
             'matches/match_text.csv')
 
-        # './filtered_vs_unfiltered_nn/full_matches_353599_embeddings.gzip',
-        # 'meta.pickle.gz')
-
-    # Display the selected page with the session state
+    # Display the search page with the current session state
     page_sent_search(state)
 
     # Mandatory to avoid rollbacks with widgets,
     # must be called at the end of your app
-    logging.debug('start sync')
-    state.sync()
-    logging.debug('end sync')
+    # logging.debug('start sync')
+    # state.sync()
+    # logging.debug('end sync')
     logging.debug('end main')
 
 
@@ -616,10 +617,14 @@ def automate_tests():
              'All tidigare vård har lett till återfall i missbruk. ”',
              'Det har lett till en överetablering och en permanent arbetslöshet bland konstnärerna.',
              'Framgången i dessa strävanden påverkar både sysselsättning och ekonomisk tillväxt i Sverige.']
-    n_ranks = [1000, 10000, 100000]
+    n_ranks = [1000, 10000] #, 100000]
     groupings = [0, 1]
     rank_settings = [[], ['average distance']]
     settings = list(product(terms, n_ranks, groupings, rank_settings))
+    with open('settings.csv', 'w') as ofile:
+        wr = csv.writer(ofile, delimiter=';')
+        for setting in settings:
+            wr.writerow(setting)
     if state.seen is None:
         state.seen = []
     print(len(settings))
@@ -666,6 +671,7 @@ def automate_tests():
     sys.exit()
 
 
+# @profile
 def automate_test_run(state, query, n_rank, search_grouping, rank_setting, n_runs=2):
     logging.debug('start test run')
     read_query_params(state)
@@ -771,7 +777,7 @@ def setup_settings_bar(state):
 
     st.sidebar.markdown('---')
     st.sidebar.markdown('## Resultat')
-    select_options = ['average rank', 'average distance']
+    select_options = ['average distance', 'summed distance']  # ['average rank', 'average distance']
     state.rank_by = st.sidebar.multiselect('rangordna efter', select_options,
                                            state.rank_by)
     select_options = ['enskilda meningar', 'dokument']
@@ -862,6 +868,7 @@ def page_sent_search(state):
              or state.query_effect not in [None, ''])
             and state.search_type == 'ämne')):
         state.outpage = []
+        query = ''
         state.outpage.append(
             f'# Resultat för {state.search_type}sbaserat sökning')
         if (state.query_cause or state.query_effect)\
@@ -894,7 +901,7 @@ def page_sent_search(state):
     elif state.outpage:
         st.markdown('  \n'.join(state.outpage[:-1]), unsafe_allow_html=True)
 
-@profile
+# @profile
 def rank(state, prompts, emb_id=None):
     state.outpage.append('---')
     state.insert_link = len(state.outpage) - 1
@@ -939,7 +946,8 @@ def rank(state, prompts, emb_id=None):
             rank_by=state.rank_by,
             n=state.top_n_ranking, emb_id=emb_id,
             sorting_func=sorting_func,
-            selected_model=state.selected_model)
+            selected_model=state.selected_model,
+            nn=state.nn)
         # keep track of last ranking
         state.ranking_key = ranking_key
         if state.run_stats is not None:
