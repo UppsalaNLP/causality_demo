@@ -587,19 +587,15 @@ def main():
     logging.debug('start main')
     state = _get_state()
     read_query_params(state)
-    if not state.train:
-        state.train, state.nn = load_documents(
-            'matches/match_embeddings.gzip',
-            'matches/match_text.csv')
 
     # Display the search page with the current session state
     page_sent_search(state)
 
     # Mandatory to avoid rollbacks with widgets,
     # must be called at the end of your app
-    # logging.debug('start sync')
-    # state.sync()
-    # logging.debug('end sync')
+    logging.debug('start sync')
+    state.sync()
+    logging.debug('end sync')
     logging.debug('end main')
 
 
@@ -688,13 +684,8 @@ def automate_test_run(state, query, n_rank, search_grouping, rank_setting, n_run
     state.scope = search_grouping
     state.rank_by = rank_setting
     state.run_stats = {'sorting time':[], 'ranking time': [], 'n_results': []}
-    if not state.train:
-        state.train = load_documents(
-            'matches/match_embeddings.gzip',
-            'matches/match_text.csv')
     for _ in tqdm(range(n_runs)):
         state.start_search = True
-        #page_sent_search(state)
         state.outpage = []
         state.outpage.append(
             f'# Resultat för {state.search_type}sbaserat sökning')
@@ -826,7 +817,11 @@ def read_default_params(state):
             emb_id = emb_id[0]
         if isinstance(emb_id, str):
             emb_id = int(emb_id)
-        default = state.train['meta'][emb_id][3]
+        train, nn = load_documents(
+            'matches/match_embeddings.gzip',
+            'matches/match_text.csv')
+
+        default = train['meta'][emb_id][3]
         state.search_type = 'mening'
     else:
         if state.query is not None:
@@ -840,7 +835,6 @@ def read_default_params(state):
 
 
 def page_sent_search(state):
-    print('in page sent search')
     setup_settings_bar(state)
     default, cause_default, effect_default, emb_id = read_default_params(state)
     if emb_id is not None:
@@ -909,10 +903,6 @@ def rank(state, prompts, emb_id=None):
     state.result = []
     logging.debug('start ranking')
     start = time.time()
-    if not hasattr(state, 'train') or not state.train:
-        state.train = load_documents(
-            'matches/match_embeddings.gzip',
-            'matches/match_text.csv')
     if isinstance(prompts, str):
         term = prompts
         prompts = [prompts]
@@ -929,30 +919,29 @@ def rank(state, prompts, emb_id=None):
     ranking_key = (term, state.scope, state.top_n_ranking,
                    ' '.join(state.rank_by))
 
-    # if not state.ranking:
-    #     state.ranking = {}
-    # ranking_key = (term, state.scope, state.top_n_ranking,
-    #                ' '.join(state.rank_by))
-    # if ranking_key not in state.ranking:
-    if True:
-        logging.debug(f'ranking {ranking_key}')
-        sorting_func = order_results_by_documents if state.scope == 1\
-            else order_results_by_sents
-        (ranking, sorting_time), ranking_time = run_ranking(
-            prompts, state.train,
-            filter={'time_from': state.time_from,
-                    'time_to': state.time_to,
-                    'emb_id': emb_id},
-            rank_by=state.rank_by,
-            n=state.top_n_ranking, emb_id=emb_id,
-            sorting_func=sorting_func,
-            selected_model=state.selected_model,
-            nn=state.nn)
-        # keep track of last ranking
-        state.ranking_key = ranking_key
-        if state.run_stats is not None:
-            state.run_stats['sorting time'].append(sorting_time)
-            state.run_stats['ranking time'].append(ranking_time)
+    train, nn = load_documents(
+        'matches/match_embeddings.gzip',
+        'matches/match_text.csv')
+
+    logging.debug(f'ranking {ranking_key}')
+    sorting_func = order_results_by_documents if state.scope == 1\
+        else order_results_by_sents
+    (ranking, sorting_time), ranking_time = run_ranking(
+        prompts, train,
+        filter={'time_from': state.time_from,
+                'time_to': state.time_to,
+                'emb_id': emb_id},
+        rank_by=state.rank_by,
+        n=state.top_n_ranking, emb_id=emb_id,
+        sorting_func=sorting_func,
+        selected_model=state.selected_model,
+        nn=nn)
+
+    # keep track of last ranking
+    state.ranking_key = ranking_key
+    if state.run_stats is not None:
+        state.run_stats['sorting time'].append(sorting_time)
+        state.run_stats['ranking time'].append(ranking_time)
     n_matches = 0
     ranking_unit = 'document' if state.scope == 1 else 'sentence'
     logging.info(
