@@ -2,7 +2,7 @@ import csv
 import base64
 import time
 # from tqdm import tqdm
-# import sys
+import sys
 from io import BytesIO
 import pickle
 from collections import OrderedDict
@@ -505,9 +505,10 @@ with open('ids2doc.pickle', 'rb') as ifile:
     ids2doc = pickle.load(ifile)
 
 
-def main():
+def main(data='full_sou'):
     logging.debug('start main')
     state = _get_state()
+    state.data = data
     read_query_params(state)
 
     # display the search page with the current session state
@@ -526,7 +527,7 @@ def setup_settings_bar(state: SessionState):
     state.n_results = 0
 
     if not state.top_n_ranking:
-        state.top_n_ranking = 10
+        state.top_n_ranking = 50
     state.top_n_ranking = st.sidebar.number_input('Top n ranking:',
                                                   min_value=50,
                                                   max_value=1000,
@@ -585,13 +586,15 @@ def read_default_params(state: SessionState) -> Tuple[str, int]:
             emb_id = emb_id[0]
         if isinstance(emb_id, str):
             emb_id = int(emb_id)
-        # train, nn = load_documents(
-        #     'matches/match_embeddings.gzip',
-        #     'matches/match_text.csv')
-        train = load_documents(
-            'matches/summary_47477_embeddings.gzip',
-            'matches/summary_text.csv')
-
+        if state.data == 'full_sou':
+            train = load_documents(
+                'matches/match_embeddings.gzip',
+                'matches/match_text.csv')
+        else:
+            # load summary text
+            train = load_documents(
+                'matches/summary_47477_embeddings.gzip',
+                'matches/summary_text.csv')
         default = train['meta'][emb_id][3]
         state.search_type = 'mening'
     else:
@@ -687,14 +690,16 @@ def rank(state: SessionState, prompts: List[str],
         term = term.strip('; ')
         state.term = term
     ranking_key = (term, state.scope, state.top_n_ranking)
-    train = load_documents(
-        'matches/summary_47477_embeddings.gzip',
-        'matches/summary_text.csv')
+    if state.data == 'full_sou':
+        train = load_documents(
+            'matches/match_embeddings.gzip',
+            'matches/match_text.csv')
+    else:
+        # load summary text
+        train = load_documents(
+            'matches/summary_47477_embeddings.gzip',
+            'matches/summary_text.csv')
     nn = fit_nn_model(train['embeddings'])
-    # train, nn = load_documents(
-    #     'matches/match_embeddings.gzip',
-    #     'matches/match_text.csv')
-
     logging.debug(f'ranking {ranking_key}')
     sorting_func = order_results_by_documents if state.scope == 1\
         else order_results_by_sents
@@ -779,4 +784,17 @@ def get_query_params(state: SessionState) -> Dict:
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1:
+        if sys.argv == 'full-text':
+            main('full_sou')
+        elif sys.argv == 'summaries':
+            main('summary')
+        else:
+            print("""
+Unkown input data option!
+select 'full-text' to search on SOU fulltext
+or 'summaries' to search on summaries only
+            """)
+            sys.exit(1)
+    else:
+        main()
