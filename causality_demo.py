@@ -259,10 +259,16 @@ def display_result(state: SessionState, term: str, doc_id: str,
             state.outpage.append(f'## [{doc_title_text}]({html_link})')
             stats_header = f'_avstånd: {match["distance"]:>1.3f}_'
             state.outpage.append(stats_header)
+            nb_matches = len(match['matched_text'])
+            to_display = nb_matches if state.dok_res else 3
+            if nb_matches > 1:
+                state.outpage.extend(
+                    ['### __Bästa resultat__',
+                     f'(_visar {min(to_display, nb_matches)} av {nb_matches} träff_)'])
             for sent in sorted(match['matched_text'],
                                key=rank_func, reverse=True):
                 sentence_match = match['matched_text'][sent]
-                if displayed_sents == 3:
+                if displayed_sents == to_display:
                     break
                 sent_stats = f'{sentence_match["distance"]:>1.3f}'
                 render_sentence(sentence_match['text']['content'],
@@ -300,7 +306,7 @@ def render_sentence(text: str, match, state: SessionState, emb_id: int,
     res['combined distance'] = stats
 
     if state.debug == 1:
-        if len(match['rank']) > 1:
+        if len(match['distances']) > 1:
             debug_stats = pd.DataFrame({'distance': match["distances"]
                                         + [match['distance'] /
                                            len(match['distances'])],
@@ -360,8 +366,7 @@ def order_results_by_sents(distances: torch.Tensor,
         embedding_id = n
         key = (contents, doc_id, id, embedding_id)
         if key not in match_dict:
-            match_dict[key] = {'rank': [],
-                               'original rank': [],
+            match_dict[key] = {'original rank': [],
                                'nb_matches': 0,
                                'distance': 0,
                                'distances': [],
@@ -455,15 +460,13 @@ def order_results_by_documents(distances: torch.Tensor,
         match['doc_id'], id = text[n][0].split(':', 1)
         match['emb_id'] = n
         if match['doc_id'] not in match_dict:
-            match_dict[match['doc_id']] = {'rank': 0,
-                                           'nb_matches': 0,
+            match_dict[match['doc_id']] = {'nb_matches': 0,
                                            'distance': 0,
                                            'distances': [],
                                            'matched_text': {}}
         key = match['doc_id']
         if id not in match_dict[key]['matched_text']:
             match_dict[key]['matched_text'][id] = {
-                'rank': [],
                 'distance': 0,
                 'distances': [],
                 'prompt_ids': [],
@@ -471,7 +474,6 @@ def order_results_by_documents(distances: torch.Tensor,
                 'text': match}
         for i, prompt in enumerate(prompts):
             distance = distances[i][j]
-            match_dict[key]['matched_text'][id]['rank'].append(j)
             match_dict[key]['matched_text'][id]['distances'].append(distance)
             match_dict[key]['matched_text'][id]['prompt_ids'].append(i)
             match_dict[key]['matched_text'][id]['prompts'].append(prompt)
@@ -482,14 +484,11 @@ def order_results_by_documents(distances: torch.Tensor,
             neighbor['matched_text'][text]['distance'] = sum(
                 neighbor['matched_text'][text]['distances'])
             stats = neighbor['matched_text'][text]
-            avg_rank = sum([int(el) + 1 for el in stats['rank']]) / len(
-                stats['rank'])
-            avg_distance = stats['distance'] / len(stats['distances'])
-            match_dict[doc_id]['rank'] += avg_rank
-            match_dict[doc_id]['distance'] += avg_distance
+            # avg_distance = stats['distance'] / len(stats['distances'])
+            summed_distance = stats['distance']
+            match_dict[doc_id]['distance'] += summed_distance
             match_dict[doc_id]['nb_matches'] += 1
             count += 1
-        match_dict[doc_id]['rank'] /= count
         match_dict[doc_id]['distance'] /= count
         match_dict[doc_id]['distance'] = match_dict[doc_id]['distance'].item()
     neighbours = OrderedDict()
@@ -530,7 +529,7 @@ def setup_settings_bar(state: SessionState):
         state.top_n_ranking = 50
     state.top_n_ranking = st.sidebar.number_input('Top n ranking:',
                                                   min_value=50,
-                                                  max_value=1000,
+                                                  max_value=500,
                                                   value=state.top_n_ranking)
     st.sidebar.markdown('---')
     st.sidebar.markdown('## Sökfråga')
@@ -545,7 +544,14 @@ def setup_settings_bar(state: SessionState):
     index = state.scope if state.scope else 0
     state.scope = select_options.index(st.sidebar.radio('gruppering',
                                                         select_options, index))
-
+    doc_options = st.sidebar.empty()
+    if state.scope:
+        select_options = ['upp till 3', 'alla']
+        index = state.dok_res if state.dok_res else 0
+        state.dok_res = select_options.index(
+            doc_options.radio('hur många träff per dokument ska visas?',
+                              select_options,
+                              index))
     st.sidebar.markdown('---')
     st.sidebar.markdown('## Filter')
     from_options = [i for i in range(1994, 2020, 1)]
@@ -785,15 +791,16 @@ def get_query_params(state: SessionState) -> Dict:
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        if sys.argv == 'full-text':
+        if sys.argv[-1] == 'full-text':
             main('full_sou')
-        elif sys.argv == 'summaries':
+        elif sys.argv[-1] == 'summary':
             main('summary')
         else:
+            print(sys.argv)
             print("""
 Unkown input data option!
 select 'full-text' to search on SOU fulltext
-or 'summaries' to search on summaries only
+or 'summary' to search on summaries only
             """)
             sys.exit(1)
     else:
