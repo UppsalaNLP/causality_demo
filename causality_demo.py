@@ -17,6 +17,7 @@ from urllib import parse
 import numpy as np
 import pandas as pd
 import streamlit as st
+from streamlit.server.server import Server
 from transformers import AutoModel, AutoTokenizer, PreTrainedTokenizer,\
     BertModel
 import torch
@@ -245,7 +246,7 @@ def display_result(state: SessionState, term: str, doc_id: str,
                                 else str(match[k])]))\
                                      if k in match else ''
 
-    if year in range(filter['time_from'], filter['time_to'])\
+    if year in range(filter['time_from'], filter['time_to'] + 1)\
        and (state.doc_id is None or state.doc_id != doc_id):
 
         displayed_sents = 0
@@ -260,11 +261,12 @@ def display_result(state: SessionState, term: str, doc_id: str,
             stats_header = f'_avstånd: {match["distance"]:>1.3f}_'
             state.outpage.append(stats_header)
             nb_matches = len(match['matched_text'])
-            to_display = nb_matches if state.dok_res else 3
+            to_display = nb_matches if state.doc_results else 3
             if nb_matches > 1:
                 state.outpage.extend(
                     ['### __Bästa resultat__',
-                     f'(_visar {min(to_display, nb_matches)} av {nb_matches} träff_)'])
+                     f'''(_visar {min(to_display, nb_matches)} av
+                     {nb_matches} träff_)'''])
             for sent in sorted(match['matched_text'],
                                key=rank_func, reverse=True):
                 sentence_match = match['matched_text'][sent]
@@ -305,28 +307,30 @@ def render_sentence(text: str, match, state: SessionState, emb_id: int,
         res['höger kontext'] = target.split('**')
     res['combined distance'] = stats
 
-    if state.debug == 1:
-        if len(match['distances']) > 1:
-            debug_stats = pd.DataFrame({'distance': match["distances"]
-                                        + [match['distance'] /
-                                           len(match['distances'])],
-                                        'prompts': match['prompts'] + ['avg']})
-        else:
-            if state.search_type == 'ämne':
-                debug_stats = pd.DataFrame({
-                    'distance': match["distances"],
-                    'prompt': match['prompts']})
-            else:
-                debug_stats = pd.DataFrame({
-                    'distance': match["distances"]})
+    # if state.debug == 1:
+    #     if len(match['distances']) > 1:
+    #         debug_stats = pd.DataFrame({'distance': match["distances"]
+    #                                     + [match['distance'] /
+    #                                        len(match['distances'])],
+    #                                     'prompts': match['prompts'] + ['avg']
+    # })
+    #     else:
+    #         if state.search_type == 'ämne':
+    #             debug_stats = pd.DataFrame({
+    #                 'distance': match["distances"],
+    #                 'prompt': match['prompts']})
+    #         else:
+    #             debug_stats = pd.DataFrame({
+    #                 'distance': match["distances"]})
 
-        state.outpage.append('  \n'
-                             + debug_stats.to_markdown().replace('\n',
-                                                                 '  \n'))
-        state.outpage.append(f'  \nembedding id: {emb_id},' +
-                             f' combined distance: {match["distance"]}')
+    #     state.outpage.append('  \n'
+    #                          + debug_stats.to_markdown().replace('\n',
+    #                                                              '  \n'))
+    #     state.outpage.append(f'  \nembedding id: {emb_id},' +
+    #                          f' combined distance: {match["distance"]}')
     res['doc'] = doc_title
     if html_link:
+        state.outpage.append(f'  \n_avstånd: {match["distance"]:>1.3f}_')
         state.outpage.append(
             f'  \n_Här hittar du dokumentet:_ [{doc_title}]({html_link})')
         res['html'] = html_link
@@ -338,11 +342,13 @@ def render_sentence(text: str, match, state: SessionState, emb_id: int,
                                      'search_type': 'mening',
                                      'scope': state.scope,
                                      'debug': state.debug,
+                                     'doc_results': state.doc_results,
+                                     'unique_docs': state.unique_docs,
                                      'top_n_ranking': state.top_n_ranking},
                                     doseq=True)
     state.outpage.append(
-        '[visa fler resultat som liknar avsnittet!]' +
-        f'(http://localhost:8501/?{preset_params})')
+        '  \n[visa fler resultat som liknar avsnittet!]' +
+        f'(http://{get_host()}/?{preset_params})')
 
     state.result.append(res)
 
@@ -525,36 +531,84 @@ def setup_settings_bar(state: SessionState):
 
     state.n_results = 0
 
-    if not state.top_n_ranking:
-        state.top_n_ranking = 50
-    state.top_n_ranking = st.sidebar.number_input('Top n ranking:',
-                                                  min_value=50,
-                                                  max_value=500,
-                                                  value=state.top_n_ranking)
-    st.sidebar.markdown('---')
-    st.sidebar.markdown('## Sökfråga')
-    select_options = ['ämne', 'mening']
+    st.sidebar.markdown(
+        '''
+        ## Sökfråga
+
+        Systemet tar olika typer av input.
+
+        Man kan antingen ge en full __mening__ eller fråga,
+        t.ex.
+
+        * _"Stress leder till sjukskrivningar."_
+        * _"Vad orsakar arbetslöshet?"_
+
+        eller nyckelord/__ämnen__ för en orsak och/eller verkan, t.ex.
+
+        * effekt: _"stigande räntor"_
+        * orsak: _"skattesänkningar"_
+        * orsak: _"jordbruk"_, effekt: _"övergödning"_.
+        ''')
+    select_options = ['mening', 'ämne']
     index = select_options.index(state.search_type) \
         if state.search_type else 0
     state.search_type = st.sidebar.radio('söka efter', select_options, index)
 
-    st.sidebar.markdown('---')
-    st.sidebar.markdown('## Resultat')
-    select_options = ['enskilda meningar', 'dokument']
+    st.sidebar.markdown(
+        """
+        ## Rankning
+
+        Bestämmer hur många träff modellen tar hänsyn till -
+        t.ex. bara de 50 eller 100 mest linknande meningar.
+
+        Ju fler träffar desto längre tid tar rankningen.
+        """)
+    if not state.top_n_ranking:
+        state.top_n_ranking = 100
+    state.top_n_ranking = st.sidebar.number_input('Top n rankning',
+                                                  min_value=50,
+                                                  max_value=300,
+                                                  value=state.top_n_ranking)
+    # st.sidebar.markdown('---')
+
+    # st.sidebar.markdown('---')
+    st.sidebar.markdown(
+        '''
+        ## Resultat
+
+        Fastställer hur resultatet ska presenteras.
+
+        Antingen sorteras meningarna efter __dokument__ där dokumentet med
+        de i genomsnitt närmaste träffarna är högst eller efter __enskilda
+        meningar__, dvs. den närmaste meningen oavsett dokumentet är högst.
+        ''')
+    select_options = ['dokument', 'enskilda meningar']
     index = state.scope if state.scope else 0
     state.scope = select_options.index(st.sidebar.radio('gruppering',
                                                         select_options, index))
+    st.sidebar.markdown('### ytterligare inställningar')
     doc_options = st.sidebar.empty()
     if state.scope:
+        state.unique_docs = doc_options.checkbox(
+            'visa bara bästa träffen per dokument',
+            value=False)
+        st.sidebar.markdown(''':arrow_right: om omarkerad visar systemet alla n meningar
+        som är närmast sökfrågan''')
+    else:
         select_options = ['upp till 3', 'alla']
-        index = state.dok_res if state.dok_res else 0
-        state.dok_res = select_options.index(
-            doc_options.radio('hur många träff per dokument ska visas?',
+        index = state.doc_results if state.doc_results else 0
+        state.doc_results = select_options.index(
+            doc_options.radio('Hur många träff per dokument ska visas?',
                               select_options,
                               index))
-    st.sidebar.markdown('---')
-    st.sidebar.markdown('## Filter')
-    from_options = [i for i in range(1994, 2020, 1)]
+    # st.sidebar.markdown('---')
+    st.sidebar.markdown(
+        '''
+        ## Filter
+
+        Begränsar resultatmängden efter tid.
+        ''')
+    from_options = [i for i in range(1994, 2021, 1)]
     index = 0
     if state.time_from:
         index = from_options.index(state.time_from)
@@ -565,11 +619,12 @@ def setup_settings_bar(state: SessionState):
         index = to_options.index(state.time_to)
     state.time_to = st.sidebar.selectbox('t.o.m', to_options, index=index)
 
-    st.sidebar.markdown('---')
-    select_options = ['off', 'on']
-    index = state.debug if state.debug else 0
-    state.debug = select_options.index(st.sidebar.radio('Debug',
-                                                        select_options, index))
+    # st.sidebar.markdown('---')
+    # select_options = ['off', 'on']
+    # index = state.debug if state.debug else 0
+    # state.debug = select_options.index(st.sidebar.radio('Debug',
+    #                                                     select_options,
+    # index))
 
 
 def read_default_params(state: SessionState) -> Tuple[str, int]:
@@ -622,6 +677,31 @@ def page_sent_search(state: SessionState):
         start_search = True
     else:
         st.title(":mag: Sökning")
+        st.markdown(
+            """
+            ## Så här gör du
+            Anpassa inställningar i sidofält-menyn, skriv in din sökfråga och
+            bekräfta genom att trycka på
+            __skapa ny sökfråga__.
+            """)
+        with st.beta_expander('Hur funkar systemet?'):
+            st.markdown(
+                '''
+Systemet beräknar likheten mellan en sökfråga och en mängd kausala meningar
+i Statens offentliga utredningar (SOU) med hjälp av en språkmodell för
+ semantisk likhet. Beroende på typen av sökfråga och resultatsgruppering krävs
+ det ytterligare rankningar:
+
+* om sökfrågan är en specifik mening jämföras bara likheten mellan meningen och
+de olika meningar i SOU:er
+* är sökfrågan ett eller fler nyckelord, genereras olika meningar eller fraser
+ med ett flertal kausala uttryck (t.ex. _"rökning **leder till** cancer"_ eller
+_"cancer **på grund av** rökning"_) extraheras de _n_ bästa träff för
+ en av dessa meningar, den genomsnittliga likheten av träffarna till alla
+ sökfraser beräknas och träffarna rankas därefter.
+* om resultatet grupperas i **dokument** rankas dokumenten efter den
+ genomsnittliga avstånd av alla träffar i samma dokument till sökfrågan.
+                ''')
         if state.search_type == 'mening':
             state.query = st.text_input('Ange en mening',
                                         default)
@@ -641,7 +721,7 @@ def page_sent_search(state: SessionState):
         state.outpage = []
         query = ''
         state.outpage.append(
-            f'# Resultat för {state.search_type}sbaserat sökning')
+            f'## __Resultat för {state.search_type}sbaserat sökning__')
         if (state.query_cause or state.query_effect)\
            and state.search_type == 'ämne':
             state.query = None
@@ -707,7 +787,7 @@ def rank(state: SessionState, prompts: List[str],
             'matches/summary_text.csv')
     nn = fit_nn_model(train['embeddings'])
     logging.debug(f'ranking {ranking_key}')
-    sorting_func = order_results_by_documents if state.scope == 1\
+    sorting_func = order_results_by_documents if state.scope == 0\
         else order_results_by_sents
     ranking = run_ranking(
         prompts, train,
@@ -721,7 +801,7 @@ def rank(state: SessionState, prompts: List[str],
     # keep track of last ranking
     state.ranking_key = ranking_key
     n_matches = 0
-    ranking_unit = 'document' if state.scope == 1 else 'sentence'
+    ranking_unit = 'document' if state.scope == 0 else 'sentence'
     logging.debug(
         f'ranking {len(ranking)}' +
         f' {ranking_unit}s for "{ranking_key}"')
@@ -739,7 +819,8 @@ def rank(state: SessionState, prompts: List[str],
             else:
                 doc_id = el
             doc_id = doc_id.split('_')[-1].split('.')[0]
-            seen_documents.append(doc_id)
+            if state.unique_docs:
+                seen_documents.append(doc_id)
             n_matches += 1
             if state.n_results and n_matches >= state.n_results:
                 break
@@ -768,7 +849,8 @@ def update_query_params(state: SessionState):
     """
     params = ['emb_id', 'time_from', 'time_to', 'debug',
               'n_results', 'search_type', 'scope', 'query',
-              'query_cause', 'query_effect', 'top_n_ranking']
+              'query_cause', 'query_effect', 'doc_results',
+              'umique_docs', 'top_n_ranking']
     updated_states = {}
 
     for param in params:
@@ -782,11 +864,28 @@ def get_query_params(state: SessionState) -> Dict:
     query_params = st.experimental_get_query_params()
     params = ['emb_id', 'time_from', 'time_to', 'debug',
               'n_results', 'search_type', 'scope', 'query',
-              'query_cause', 'query_effect', 'top_n_ranking']
+              'query_cause', 'query_effect',  'doc_results',
+              'umique_docs', 'top_n_ranking']
     for p in params:
         if p not in query_params and state[p] is not None:
             query_params[p] = state[p]
     return query_params
+
+
+def get_host():
+    # Hack to get the session object from Streamlit.
+
+    current_server = Server.get_current()
+    if hasattr(current_server, '_session_infos'):
+        # Streamlit < 0.56
+        session_infos = Server.get_current()._session_infos.values()
+    else:
+        session_infos = Server.get_current()._session_info_by_id.values()
+
+    # Multiple Session Objects?
+    for session_info in session_infos:
+        headers = session_info.ws.request.headers
+        return headers['Host']
 
 
 if __name__ == "__main__":
