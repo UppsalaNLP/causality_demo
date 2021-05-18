@@ -425,8 +425,7 @@ def run_ranking(prompts: List[str], train: Dict[str, torch.Tensor],
                                                for i in top_k_id]))
         # rerank based on remaining prompts
         reranked_dist = torch.tensor(
-            cosine_distances(torch.cat([embeddings[:i],
-                                        embeddings[i+1:]]),
+            cosine_distances(reranking_prompts,
                              top_k_emb))
         dist = torch.cat([torch.tensor(top_k_dist), reranked_dist])
     else:
