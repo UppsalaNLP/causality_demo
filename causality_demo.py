@@ -407,9 +407,9 @@ def run_ranking(prompts: List[str], train: Dict[str, torch.Tensor],
     logging.debug('start run_ranking')
     start = time.time()
     if emb_id is None:
-        embeddings = embed_text(prompts)
+        prompt_embeddings = embed_text(prompts)
     else:
-        embeddings = torch.unsqueeze(train['embeddings'][emb_id], dim=0)
+        prompt_embeddings = torch.unsqueeze(train['embeddings'][emb_id], dim=0)
     if len(prompts) > 1:
         i = 5
         prompt = prompts[i]
@@ -417,7 +417,7 @@ def run_ranking(prompts: List[str], train: Dict[str, torch.Tensor],
         prompts = [prompt] + reranking_prompts
         logging.debug('call kneighbors')
         top_k_dist, top_k_id = nn.kneighbors(
-            torch.unsqueeze(embeddings[i], axis=0),
+            torch.unsqueeze(prompt_embeddings[i], axis=0),
             n_neighbors=n)
         logging.debug('finished')
         top_k_id = top_k_id[0]
@@ -425,11 +425,11 @@ def run_ranking(prompts: List[str], train: Dict[str, torch.Tensor],
                                                for i in top_k_id]))
         # rerank based on remaining prompts
         reranked_dist = torch.tensor(
-            cosine_distances(reranking_prompts,
+            cosine_distances(torch.cat([prompt_embeddings[:i], prompt_embeddings[i+1:]]),
                              top_k_emb))
         dist = torch.cat([torch.tensor(top_k_dist), reranked_dist])
     else:
-        dist, top_k_id = nn.kneighbors(embeddings, n_neighbors=n)
+        dist, top_k_id = nn.kneighbors(prompt_embeddings, n_neighbors=n)
         dist = torch.tensor(dist)
         top_k_id = top_k_id[0]
     logging.debug('end run_ranking')
