@@ -175,7 +175,7 @@ def embed_text(samples: List[str]) -> torch.Tensor:
     model.eval()
     logging.debug(f'embedding {len(samples)} sentences ...')
     embeddings = []
-    batch_size = 100
+    batch_size = 5
     with torch.no_grad():
         if on_gpu:
             model.to('cuda')
