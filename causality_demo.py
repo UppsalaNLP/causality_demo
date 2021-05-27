@@ -1,7 +1,6 @@
 import csv
 import base64
 import time
-# from tqdm import tqdm
 import sys
 from io import BytesIO
 import pickle
@@ -24,7 +23,6 @@ import torch
 
 from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics.pairwise import cosine_distances
-# from memory_profiler import profile
 
 from multipage_session_state import _SessionState as SessionState
 from multipage_session_state import _get_state
@@ -33,7 +31,6 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 logging.basicConfig(format='%(asctime)s %(message)s',
                     level=logging.INFO)
 logging.root.setLevel(logging.INFO)
-# logging.root.setLevel(logging.NOTSET)
 
 st.set_page_config(page_title='demo app',
                    page_icon=':mag:',
@@ -558,7 +555,7 @@ def setup_settings_bar(state: SessionState):
         ## Rankning
 
         Bestämmer hur många träff modellen tar hänsyn till -
-        t.ex. bara de 50 eller 100 mest linknande meningar.
+        t.ex. bara de 50 eller 100 mest liknande meningar.
 
         Ju fler träffar desto längre tid tar rankningen.
         """)
@@ -568,9 +565,6 @@ def setup_settings_bar(state: SessionState):
                                                   min_value=50,
                                                   max_value=300,
                                                   value=state.top_n_ranking)
-    # st.sidebar.markdown('---')
-
-    # st.sidebar.markdown('---')
     st.sidebar.markdown(
         '''
         ## Resultat
@@ -600,7 +594,7 @@ def setup_settings_bar(state: SessionState):
             doc_options.radio('Hur många träff per dokument ska visas?',
                               select_options,
                               index))
-    # st.sidebar.markdown('---')
+
     st.sidebar.markdown(
         '''
         ## Filter
@@ -720,7 +714,7 @@ _"cancer **på grund av** rökning"_) extraheras de _n_ bästa träff för
         state.outpage = []
         query = ''
         state.outpage.append(
-            f'## __Resultat för {state.search_type}sbaserat sökning__')
+            f'## __Resultat för {state.search_type}sbaserad sökning__')
         if (state.query_cause or state.query_effect)\
            and state.search_type == 'ämne':
             state.query = None
