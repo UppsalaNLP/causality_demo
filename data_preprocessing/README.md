@@ -5,7 +5,7 @@
    Download it and update the path in segmentation.py.
    **Edit:** you can now download it with pip and directly load it.
 
-## 1) Restructure the html files on https://data.riksdagen.se using extract_from_html (data_extraction)
+## 1) Restructure the html files on https://data.riksdagen.se using extract_from_html ([causality_extraction](https://github.com/LuDuerlich/causality_extraction))
    Follow run_example. This reads in document metadata from documents.pickle (title, date and link to the html of the report), parses the corresponding html and finally creates the files in https://github.com/UppsalaNLP/SOU-corpus/tree/master/html.
 
 ## 2) Tagging
